@@ -1,0 +1,81 @@
+# Extracts the Exchange Shop icons and official English names from the game's
+# public CDN and publishes them to a public repository, so bots without UnityPy
+# (release EXE, Termux) can download them as plain files (utils/shop_icon_pack.py).
+# The pack lives on its own branch (PACK_BRANCH) of the public PACK_REPO; each
+# publish force-pushes that branch only, never main.
+#
+# Setup (once): add a fine-grained token with "Contents: Read and write" on
+# PACK_REPO only as
+# the secret SHOP_ICON_PACK_TOKEN (Settings > Secrets and variables > Actions),
+# then run this workflow once by hand with "force" ticked.
+name: Shop icon pack
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build and publish even if the game has not changed
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shop-icon-pack
+  cancel-in-progress: false
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PACK_REPO: blueno11/DBL_Termux
+      PACK_BRANCH: shop-icons
+      PACK_DIR: ${{ github.workspace }}/../shop-icon-pack
+      WORK_DIR: ${{ github.workspace }}/../shop-icon-work
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: .github/shop-icon-pack-requirements.txt
+
+      - name: Install the extractor
+        run: python -m pip install -r .github/shop-icon-pack-requirements.txt
+
+      - name: Build the pack from the game CDN
+        id: build
+        run: >-
+          python -m utils.shop_icon_pack build
+          --work "$WORK_DIR" --out "$PACK_DIR" --repo "$PACK_REPO"
+          ${{ inputs.force && '--force' || '' }}
+
+      - name: Publish the pack
+        if: steps.build.outputs.changed == 'true'
+        env:
+          TOKEN: ${{ secrets.SHOP_ICON_PACK_TOKEN }}
+          ASSET_VERSION: ${{ steps.build.outputs.asset_version }}
+          MASTER_VERSION: ${{ steps.build.outputs.master_version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TOKEN}" ]; then
+            echo "::error::Add the SHOP_ICON_PACK_TOKEN secret (setup steps at the top of this workflow)."
+            exit 1
+          fi
+          cd "$PACK_DIR"
+          git init -q -b "$PACK_BRANCH"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Shop icons for game asset version ${ASSET_VERSION}, master ${MASTER_VERSION}"
+          # One commit only: every update replaces this branch, so the
+          # repository does not grow with old images. Only PACK_BRANCH is
+          # pushed; main and every other branch are left alone.
+          REMOTE="https://x-access-token:${TOKEN}@github.com/${PACK_REPO}.git"
+          git push -q --force "$REMOTE" "HEAD:refs/heads/${PACK_BRANCH}"
+          echo "Published asset version ${ASSET_VERSION} to ${PACK_REPO} (${PACK_BRANCH})."
